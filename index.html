@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D Piano Simulator</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background-color: #121212;
+      touch-action: manipulation;
+    }
+    .loading {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      font-family: Arial, sans-serif;
+      font-size: 24px;
+      text-align: center;
+    }
+    .progress-container {
+      width: 300px;
+      height: 10px;
+      background-color: #333;
+      margin-top: 20px;
+      border-radius: 5px;
+    }
+    .progress-bar {
+      height: 100%;
+      width: 0;
+      background-color: #4CAF50;
+      border-radius: 5px;
+      transition: width 0.3s;
+    }
+  </style>
+</head>
+<body>
+  <div class="loading" id="loadingScreen">
+    <div>Loading Piano Simulator...</div>
+    <div class="progress-container">
+      <div class="progress-bar" id="progress"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/howler@2.2.3/dist/howler.min.js"></script>
+  <script>
+    // Main application
+    const app = {
+      // Setup variables
+      scene: null,
+      camera: null,
+      renderer: null,
+      keys: [],
+      sounds: {},
+      raycaster: new THREE.Raycaster(),
+      mouse: new THREE.Vector2(),
+      notePlaying: null,
+      loadingManager: null,
+      assetsLoaded: false,
+      
+      // Piano constants - these serve as base values that may be scaled
+      whiteKeyWidth: 0.4,
+      whiteKeyHeight: 0.04,
+      whiteKeyDepth: 2.0,
+      blackKeyWidth: 0.26,
+      blackKeyHeight: 0.04,
+      blackKeyDepth: 1.3,
+      blackKeyOffset: 0.25,
+      keySpacing: 0.02,
+      
+      // Dynamic scaling factor - adjusted based on device screen size
+      scaleFactor: 1.0,
+      
+      // Note configuration
+      octaves: 3,
+      startOctave: 3,
+      
+      // Initialize the application
+      init: function() {
+        // Set scale factor based on screen size
+        this.calculateScaleFactor();
+        
+        // Create custom loading manager
+        this.loadingManager = new THREE.LoadingManager();
+        
+        this.loadingManager.onProgress = (url, itemsLoaded, itemsTotal) => {
+          document.getElementById('progress').style.width = 
+            `${(itemsLoaded / itemsTotal) * 100}%`;
+        };
+        
+        this.loadingManager.onLoad = () => {
+          this.assetsLoaded = true;
+          this.hideLoadingScreen();
+        };
+        
+        // Create scene
+        this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(0x121212);
+        
+        // Create camera with wider field of view
+        this.camera = new THREE.PerspectiveCamera(
+          35, window.innerWidth / window.innerHeight, 0.1, 1000
+        );
+        
+        // Position camera further back to view the larger piano
+        this.camera.position.set(0, 3.5, 7);
+        this.camera.lookAt(0, -0.5, 0);
+        
+        // Create renderer with improved shadow capabilities
+        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(window.devicePixelRatio);
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(this.renderer.domElement);
+        
+        // Enhanced lighting system for more realistic piano
+        const ambientLight = new THREE.AmbientLight(0xdcddff, 0.4);
+        this.scene.add(ambientLight);
+        
+        const frontLight = new THREE.DirectionalLight(0xffffff, 0.7);
+        frontLight.position.set(0, 5, 5);
+        frontLight.castShadow = true;
+        frontLight.shadow.mapSize.width = 1024;
+        frontLight.shadow.mapSize.height = 1024;
+        this.scene.add(frontLight);
+        
+        const backLight = new THREE.DirectionalLight(0xffeeff, 0.3);
+        backLight.position.set(0, 3, -5);
+        this.scene.add(backLight);
+        
+        // Create piano
+        this.createPiano();
+        
+        // Load sounds
+        this.loadSounds();
+        
+        // Add event listeners
+        window.addEventListener('resize', this.onWindowResize.bind(this), false);
+        document.addEventListener('mousedown', this.onDocumentMouseDown.bind(this), false);
+        document.addEventListener('mouseup', this.onDocumentMouseUp.bind(this), false);
+        document.addEventListener('touchstart', this.onDocumentTouchStart.bind(this), false);
+        document.addEventListener('touchend', this.onDocumentTouchEnd.bind(this), false);
+        
+        // Start animation loop
+        this.animate();
+      },
+      
+      hideLoadingScreen: function() {
+        const loadingScreen = document.getElementById('loadingScreen');
+        if (loadingScreen) {
+          loadingScreen.style.display = 'none';
+        }
+      },
+      
+      createPiano: function() {
+        // Notes in an octave (C, C#, D, D#, E, F, F#, G, G#, A, A#, B)
+        const octaveNotes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+        const isBlackKey = [false, true, false, true, false, false, true, false, true, false, true, false];
+        
+        // Materials with improved visuals
+        const whiteKeyMaterial = new THREE.MeshStandardMaterial({ 
+          color: 0xfcfcfc,
+          roughness: 0.2,
+          metalness: 0.05
+        });
+        
+        const blackKeyMaterial = new THREE.MeshStandardMaterial({ 
+          color: 0x111111,
+          roughness: 0.1, 
+          metalness: 0.05
+        });
+        
+        // Add a piano base for visual appeal
+        const baseWidth = this.octaves * 7 * (this.whiteKeyWidth + this.keySpacing) + 0.2;
+        const baseHeight = 0.1;
+        const baseDepth = this.whiteKeyDepth + 0.3;
+        
+        const baseGeometry = new THREE.BoxGeometry(baseWidth, baseHeight, baseDepth);
+        const baseMaterial = new THREE.MeshStandardMaterial({
+          color: 0x5c3a21, // Rich wood color
+          roughness: 0.7,
+          metalness: 0.1
+        });
+        
+        const pianoBase = new THREE.Mesh(baseGeometry, baseMaterial);
+        pianoBase.position.y = -0.07; // Position slightly below the keys
+        pianoBase.position.z = -this.whiteKeyDepth/2; // Align with the keys
+        this.scene.add(pianoBase);
+        
+        const keyboardWidth = this.octaves * 7 * (this.whiteKeyWidth + this.keySpacing) - this.keySpacing;
+        
+        // Create white keys
+        const whiteKeyGeometry = new THREE.BoxGeometry(
+          this.whiteKeyWidth, this.whiteKeyHeight, this.whiteKeyDepth
+        );
+        
+        let whiteKeyIndex = 0;
+        
+        for (let octave = this.startOctave; octave < this.startOctave + this.octaves; octave++) {
+          for (let i = 0; i < 12; i++) {
+            const note = octaveNotes[i];
+            const isBlack = isBlackKey[i];
+            
+            if (!isBlack) {
+              const keyObj = new THREE.Mesh(whiteKeyGeometry, whiteKeyMaterial.clone());
+              
+              // Position the key
+              keyObj.position.x = -keyboardWidth/2 + whiteKeyIndex * (this.whiteKeyWidth + this.keySpacing) + this.whiteKeyWidth/2;
+              keyObj.position.y = 0;
+              // Flip the keyboard by changing the z position
+              keyObj.position.z = -this.whiteKeyDepth/2;
+              
+              // Store key information
+              const keyInfo = {
+                mesh: keyObj,
+                note: `${note}${octave}`,
+                isBlack: false,
+                isPressed: false,
+                originalY: 0,
+                originalColor: 0xffffff
+              };
+              
+              this.keys.push(keyInfo);
+              this.scene.add(keyObj);
+              
+              whiteKeyIndex++;
+            }
+          }
+        }
+        
+        // Create black keys
+        const blackKeyGeometry = new THREE.BoxGeometry(
+          this.blackKeyWidth, this.blackKeyHeight, this.blackKeyDepth
+        );
+        
+        // Track which white keys we've processed to position black keys
+        let whiteKeyCount = 0;
+        
+        for (let octave = this.startOctave; octave < this.startOctave + this.octaves; octave++) {
+          for (let i = 0; i < 12; i++) {
+            const note = octaveNotes[i];
+            const isBlack = isBlackKey[i];
+            
+            if (!isBlack) {
+              whiteKeyCount++;
+            } else {
+              const keyObj = new THREE.Mesh(blackKeyGeometry, blackKeyMaterial.clone());
+              
+              // Position the key (offset from previous white key)
+              const prevWhiteKeyX = -keyboardWidth/2 + (whiteKeyCount - 1) * (this.whiteKeyWidth + this.keySpacing) + this.whiteKeyWidth/2;
+              keyObj.position.x = prevWhiteKeyX + this.blackKeyOffset;
+              keyObj.position.y = this.whiteKeyHeight / 2;
+              // Flip the keyboard by changing the z position - black keys at the top
+              keyObj.position.z = -this.whiteKeyDepth + this.blackKeyDepth/2;
+              
+              // Store key information
+              const keyInfo = {
+                mesh: keyObj,
+                note: `${note}${octave}`,
+                isBlack: true,
+                isPressed: false,
+                originalY: this.whiteKeyHeight / 2,
+                originalColor: 0x111111
+              };
+              
+              this.keys.push(keyInfo);
+              this.scene.add(keyObj);
+            }
+          }
+        }
+      },
+      
+      loadSounds: function() {
+        // Let's use a simplified approach with AudioContext
+        try {
+          // Initialize audio context
+          window.AudioContext = window.AudioContext || window.webkitAudioContext;
+          this.audioContext = new AudioContext();
+          
+          // Base audio frequencies for reference (A4 = 440 Hz)
+          const A4 = 440;
+          const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+          
+          // Function to get frequency for a note
+          const getFrequency = (note, octave) => {
+            const noteIndex = notes.indexOf(note);
+            // Calculate semitones from A4
+            const semitones = (octave - 4) * 12 + noteIndex - 9;
+            // Calculate frequency using the formula: f = A4 * 2^(semitones/12)
+            return A4 * Math.pow(2, semitones / 12);
+          };
+          
+          // Create a more piano-like tone generator function
+          const createPianoSound = (frequency) => {
+            return () => {
+              // Create multiple oscillators for a richer sound
+              const oscillators = [];
+              
+              // Main oscillator (fundamental frequency)
+              const osc1 = this.audioContext.createOscillator();
+              osc1.type = 'triangle';
+              osc1.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
+              
+              // Overtones to create a more piano-like sound
+              const osc2 = this.audioContext.createOscillator();
+              osc2.type = 'sine';
+              osc2.frequency.setValueAtTime(frequency * 2, this.audioContext.currentTime); // First overtone (2× frequency)
+              
+              const osc3 = this.audioContext.createOscillator();
+              osc3.type = 'sine';
+              osc3.frequency.setValueAtTime(frequency * 3, this.audioContext.currentTime); // Second overtone (3× frequency)
+              
+              // Create main gain node for envelope
+              const mainGain = this.audioContext.createGain();
+              mainGain.gain.setValueAtTime(0, this.audioContext.currentTime);
+              mainGain.gain.linearRampToValueAtTime(0.5, this.audioContext.currentTime + 0.02); // Quick attack
+              mainGain.gain.exponentialRampToValueAtTime(0.1, this.audioContext.currentTime + 0.5); // Initial decay
+              mainGain.gain.exponentialRampToValueAtTime(0.001, this.audioContext.currentTime + 2.0); // Long release
+              
+              // Gain nodes for individual oscillators (for balanced mixing)
+              const gain1 = this.audioContext.createGain();
+              gain1.gain.value = 0.6; // Fundamental
+              
+              const gain2 = this.audioContext.createGain();
+              gain2.gain.value = 0.2; // First overtone
+              
+              const gain3 = this.audioContext.createGain();
+              gain3.gain.value = 0.1; // Second overtone
+              
+              // Connect oscillators to their gains
+              osc1.connect(gain1);
+              osc2.connect(gain2);
+              osc3.connect(gain3);
+              
+              // Connect all to the main gain
+              gain1.connect(mainGain);
+              gain2.connect(mainGain);
+              gain3.connect(mainGain);
+              
+              // Connect main gain to destination
+              mainGain.connect(this.audioContext.destination);
+              
+              // Start oscillators
+              osc1.start();
+              osc2.start();
+              osc3.start();
+              
+              // Stop oscillators
+              const stopTime = this.audioContext.currentTime + 2.0;
+              osc1.stop(stopTime);
+              osc2.stop(stopTime);
+              osc3.stop(stopTime);
+              
+              // Add slight detune for a more natural sound
+              osc1.detune.value = -5;
+              osc2.detune.value = 5;
+              osc3.detune.value = -2;
+              
+              // Store for potential cleanup
+              oscillators.push(osc1, osc2, osc3);
+              return oscillators;
+            };
+          };
+          
+          // Create sounds for each key
+          for (let octave = this.startOctave; octave < this.startOctave + this.octaves; octave++) {
+            for (let i = 0; i < 12; i++) {
+              const note = notes[i];
+              const noteWithOctave = `${note}${octave}`;
+              const frequency = getFrequency(note, octave);
+              
+              // Store the frequency and piano sound generator for this note
+              this.sounds[noteWithOctave] = {
+                frequency: frequency,
+                play: createPianoSound(frequency)
+              };
+            }
+          }
+          
+          console.log('Piano sound system initialized with harmonics');
+          this.hideLoadingScreen();
+          
+        } catch (e) {
+          console.error('AudioContext failed to initialize:', e);
+          this.hideLoadingScreen();
+        }
+      },
+      
+      playNote: function(note) {
+        console.log(`Attempting to play note: ${note}`);
+        
+        // Make sure audioContext is resumed (needed due to browser autoplay policies)
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+          this.audioContext.resume();
+        }
+        
+        if (this.sounds[note]) {
+          try {
+            this.sounds[note].play();
+            console.log(`Playing note ${note}`);
+          } catch (e) {
+            console.error(`Error playing note ${note}:`, e);
+          }
+        } else {
+          console.error(`Note ${note} not found in sounds collection`);
+        }
+      },
+      
+      // Calculate a scaling factor based on screen dimensions
+      calculateScaleFactor: function() {
+        // Get screen dimensions
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        
+        // Determine if we're on mobile or desktop
+        const isMobile = width < 768;
+        
+        // Base scale on the smaller dimension
+        const minDimension = Math.min(width, height);
+        
+        if (isMobile) {
+          // On mobile, make keys larger for touch
+          this.scaleFactor = minDimension / 600;
+          // For smaller screens, reduce the number of octaves for better visibility
+          if (width < 500) {
+            this.octaves = 2;
+          }
+        } else {
+          // On desktop, set scale relative to screen size
+          this.scaleFactor = minDimension / 800;
+        }
+        
+        // Clamp scale factor to reasonable limits
+        this.scaleFactor = Math.max(0.7, Math.min(1.5, this.scaleFactor));
+        
+        console.log(`Device width: ${width}, Scale factor: ${this.scaleFactor}, Octaves: ${this.octaves}`);
+        
+        // Apply scale factor to piano constants
+        this.whiteKeyWidth *= this.scaleFactor;
+        this.whiteKeyHeight *= this.scaleFactor;
+        this.whiteKeyDepth *= this.scaleFactor;
+        this.blackKeyWidth *= this.scaleFactor;
+        this.blackKeyHeight *= this.scaleFactor;
+        this.blackKeyDepth *= this.scaleFactor;
+        this.blackKeyOffset *= this.scaleFactor;
+        this.keySpacing *= this.scaleFactor;
+      },
+      
+      // Adjust the piano position and camera when the window resizes
+      onWindowResize: function() {
+        // Update camera
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        
+        // Adjust camera position based on new screen dimensions
+        const aspectRatio = window.innerWidth / window.innerHeight;
+        const isMobile = window.innerWidth < 768;
+        
+        if (isMobile && aspectRatio < 1) {
+          // Portrait mobile - move camera higher and further back
+          this.camera.position.set(0, 4, 9);
+        } else if (isMobile) {
+          // Landscape mobile
+          this.camera.position.set(0, 3.5, 8);
+        } else {
+          // Desktop
+          this.camera.position.set(0, 3.5, 7);
+        }
+        
+        this.camera.lookAt(0, -0.5, 0);
+      },
+      
+      // Event handlers
+      onDocumentMouseDown: function(event) {
+        event.preventDefault();
+        
+        // Calculate mouse coordinates for both mouse and touch
+        let clientX, clientY;
+        if (event.touches) {
+          clientX = event.touches[0].clientX;
+          clientY = event.touches[0].clientY;
+        } else {
+          clientX = event.clientX;
+          clientY = event.clientY;
+        }
+        
+        this.mouse.x = (clientX / window.innerWidth) * 2 - 1;
+        this.mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+        
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        
+        // Get all meshes from the keys array
+        const keyMeshes = this.keys.map(key => key.mesh);
+        const intersects = this.raycaster.intersectObjects(keyMeshes);
+        
+        if (intersects.length > 0) {
+          const selectedMesh = intersects[0].object;
+          const keyInfo = this.keys.find(key => key.mesh === selectedMesh);
+          
+          if (keyInfo && !keyInfo.isPressed) {
+            console.log(`Key pressed: ${keyInfo.note}`);
+            
+            // Play note
+            this.playNote(keyInfo.note);
+            
+            // Enhanced visual feedback - press key down with smoother animation
+            keyInfo.isPressed = true;
+            const pressDepth = keyInfo.isBlack ? 0.02 : 0.02;
+            keyInfo.mesh.position.y -= pressDepth;
+            
+            // Change color slightly when pressed with improved highlighting
+            if (keyInfo.isBlack) {
+              keyInfo.mesh.material.color.setHex(0x333333);
+              keyInfo.mesh.material.emissive.setHex(0x111111);
+            } else {
+              keyInfo.mesh.material.color.setHex(0xdddddd);
+              keyInfo.mesh.material.emissive.setHex(0x222222);
+            }
+            
+            // Store currently played note
+            this.notePlaying = keyInfo;
+          }
+        }
+      },
+      
+      onDocumentMouseUp: function() {
+        // Reset any pressed keys
+        if (this.notePlaying) {
+          this.notePlaying.isPressed = false;
+          this.notePlaying.mesh.position.y = this.notePlaying.originalY;
+          this.notePlaying.mesh.material.color.setHex(this.notePlaying.originalColor);
+          this.notePlaying = null;
+        }
+      },
+      
+      onDocumentTouchStart: function(event) {
+        // Prevent scrolling/zooming when interacting with the piano
+        event.preventDefault();
+        
+        // Handle touch the same way as mouse
+        const touch = event.touches[0];
+        
+        this.mouse.x = (touch.clientX / window.innerWidth) * 2 - 1;
+        this.mouse.y = -(touch.clientY / window.innerHeight) * 2 + 1;
+        
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        
+        // Get all meshes from the keys array
+        const keyMeshes = this.keys.map(key => key.mesh);
+        const intersects = this.raycaster.intersectObjects(keyMeshes);
+        
+        if (intersects.length > 0) {
+          const selectedMesh = intersects[0].object;
+          const keyInfo = this.keys.find(key => key.mesh === selectedMesh);
+          
+          if (keyInfo && !keyInfo.isPressed) {
+            console.log(`Key pressed (touch): ${keyInfo.note}`);
+            
+            // Play note
+            this.playNote(keyInfo.note);
+            
+            // Enhanced visual feedback for touch
+            keyInfo.isPressed = true;
+            const pressDepth = keyInfo.isBlack ? 0.02 : 0.02;
+            keyInfo.mesh.position.y -= pressDepth;
+            
+            // Change color slightly when pressed
+            if (keyInfo.isBlack) {
+              keyInfo.mesh.material.color.setHex(0x333333);
+              keyInfo.mesh.material.emissive.setHex(0x111111);
+            } else {
+              keyInfo.mesh.material.color.setHex(0xdddddd);
+              keyInfo.mesh.material.emissive.setHex(0x222222);
+            }
+            
+            // Store currently played note
+            this.notePlaying = keyInfo;
+          }
+        }
+      },
+      
+      onDocumentTouchEnd: function() {
+        // Reset any pressed keys
+        if (this.notePlaying) {
+          this.notePlaying.isPressed = false;
+          this.notePlaying.mesh.position.y = this.notePlaying.originalY;
+          this.notePlaying.mesh.material.color.setHex(this.notePlaying.originalColor);
+          this.notePlaying = null;
+        }
+      },
+      
+      // Animation loop
+      animate: function() {
+        requestAnimationFrame(this.animate.bind(this));
+        this.renderer.render(this.scene, this.camera);
+      }
+    };
+    
+    // Start the application when the window loads
+    window.onload = function() {
+      app.init();
+    };
+  </script>
+</body>
+</html>
